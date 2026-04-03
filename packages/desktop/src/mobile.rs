@@ -86,7 +86,7 @@ pub extern "C" fn start_app() {
         //   line) we abort instead of hanging the process silently.
         {
             let (lock, cvar) = &*ANDROID_SETUP_CONDVAR;
-            let (_, timed_out) = cvar
+            let (c, timed_out) = cvar
                 .wait_timeout_while(
                     lock.lock().unwrap(),
                     std::time::Duration::from_secs(10),
