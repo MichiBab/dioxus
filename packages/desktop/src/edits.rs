@@ -357,14 +357,15 @@ impl EditWebsocket {
                         match websocket.read() {
                             Ok(tungstenite::Message::Binary(_)) => break 'ack true,
                             Ok(tungstenite::Message::Close(_)) => break 'ack false,
-                            // SO_RCVTIMEO fired (EAGAIN/WouldBlock) or handle_connection
-                            // called shutdown() on our TCP stream.  Check whether a newer
-                            // connection has been registered – if so, exit so we can forward
-                            // the in-flight edit; if not, the WebView is just slow so keep
-                            // waiting.
+                            // SO_RCVTIMEO fired (EAGAIN/WouldBlock), handle_connection
+                            // called shutdown() on our TCP stream, or the syscall was
+                            // interrupted by a signal (EINTR / os error 4).  EINTR must
+                            // always be retried; WouldBlock/EAGAIN means check superseded.
                             Err(tungstenite::Error::Io(ref io_err))
                                 if io_err.kind() == std::io::ErrorKind::WouldBlock
-                                    || io_err.raw_os_error() == Some(11) =>
+                                    || io_err.kind() == std::io::ErrorKind::Interrupted
+                                    || io_err.raw_os_error() == Some(11)
+                                    || io_err.raw_os_error() == Some(4) =>
                             {
                                 let superseded = {
                                     let conns = connections_.read().unwrap();
