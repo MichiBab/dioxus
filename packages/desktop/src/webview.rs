@@ -201,6 +201,12 @@ pub(crate) struct WebviewInstance {
     pub desktop_context: DesktopContext,
     pub waker: Waker,
 
+    /// Tracks when we last called `send_edits` so we can detect a stalled
+    /// edits-flush (i.e. the WebSocket to the WebView was silently dropped)
+    /// and recover by re-triggering the WebView's reconnect handshake.
+    #[cfg(target_os = "android")]
+    edits_stuck_since: Option<std::time::Instant>,
+
     // Wry assumes the webcontext is alive for the lifetime of the webview.
     // We need to keep the webcontext alive, otherwise the webview will crash
     _web_context: WebContext,
@@ -531,6 +537,8 @@ impl WebviewInstance {
             edits,
             waker: tao_waker(shared.proxy.clone(), desktop_context.window.id()),
             desktop_context,
+            #[cfg(target_os = "android")]
+            edits_stuck_since: None,
             _menu: menu,
             _web_context: web_context,
         }
@@ -566,7 +574,37 @@ impl WebviewInstance {
             let edits_flushed_poll = self.edits.wry_queue.poll_edits_flushed(&mut cx);
             if edits_flushed_poll.is_pending() {
                 eprintln!("DBG-FREEZE: edits flushed is pending, waiting for flush to complete");
+
+                // Android: if the edits flush has been stuck for more than 3 seconds the
+                // WebSocket connection to the WebView was likely silently broken during a
+                // background/foreground transition.  Reset the pending state and send a
+                // reconnect signal so the WebView re-establishes the channel.
+                #[cfg(target_os = "android")]
+                {
+                    const STUCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+                    let stuck_since = self
+                        .edits_stuck_since
+                        .get_or_insert_with(std::time::Instant::now);
+                    if stuck_since.elapsed() >= STUCK_TIMEOUT {
+                        eprintln!("DBG-FREEZE: edits flush timed out after 3s – reconnecting WebView WebSocket");
+                        self.edits.wry_queue.clear_edits_in_progress();
+                        self.edits_stuck_since = None;
+                        _ = self.desktop_context.webview.evaluate_script(&format!(
+                            "window.interpreter.waitForRequest(\"{edits_path}\", \"{expected_key}\");",
+                            edits_path = self.edits.wry_queue.edits_path(),
+                            expected_key = self.edits.wry_queue.required_server_key()
+                        ));
+                        // Fall through to re-poll the VirtualDom this iteration.
+                        continue;
+                    }
+                }
+
                 return;
+            }
+            // Edits were flushed – clear the stuck timer.
+            #[cfg(target_os = "android")]
+            {
+                self.edits_stuck_since = None;
             }
 
             {
@@ -596,6 +634,11 @@ impl WebviewInstance {
                 .with_mutation_state_mut(|f| self.dom.render_immediate(f));
             self.edits.wry_queue.send_edits();
             eprintln!("DBG-FREEZE: sent edits to webview");
+            // Start tracking how long we wait for the flush acknowledgement.
+            #[cfg(target_os = "android")]
+            {
+                self.edits_stuck_since = Some(std::time::Instant::now());
+            }
         }
     }
 

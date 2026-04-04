@@ -73,6 +73,16 @@ impl WryQueue {
         }
     }
 
+    /// Drop any pending edits-in-flight acknowledgement.
+    ///
+    /// Called on Android when the edits flush has been stuck for an extended period,
+    /// which indicates the WebSocket connection to the webview was silently broken.
+    /// Resetting the field lets `poll_vdom` proceed and re-send a reconnect signal.
+    #[cfg(target_os = "android")]
+    pub(crate) fn clear_edits_in_progress(&self) {
+        self.inner.borrow_mut().edits_in_progress = None;
+    }
+
     /// Check if there is a new location for the websocket edits server.
     pub(crate) fn poll_new_edits_location(
         &self,
