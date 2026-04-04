@@ -237,12 +237,12 @@ impl EditWebsocket {
         connections: Arc<RwLock<HashMap<u32, WebviewConnectionState>>>,
     ) {
         // On Android the loopback TCP connection can silently die during a background/foreground
-        // transition.  Set a generous timeout as a last-resort fallback so the handler thread
-        // never leaks if JS fails to reconnect.  In practice we force-close the old TCP stream
-        // immediately when a replacement connection arrives (see below), so the handler exits
-        // in milliseconds rather than waiting for this timeout.
+        // transition.  Set a read timeout as a last-resort fallback so the handler thread never
+        // leaks if JS fails to reconnect.  The fast path is shutdown(Both) called when a
+        // replacement connection arrives (see below), which unblocks the handler in <100 ms;
+        // this timeout is only reached when JS never reconnects at all (e.g. very deep doze).
         #[cfg(target_os = "android")]
-        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
 
         // Clone the stream descriptor BEFORE handing it to tungstenite.  We keep this clone in
         // the connection state so that when a replacement arrives we can call shutdown(Both) to

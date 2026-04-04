@@ -587,7 +587,11 @@ impl WebviewInstance {
                 // delivered and ACK'd naturally.
                 #[cfg(target_os = "android")]
                 {
-                    const STUCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+                    // 500 ms: once is_connection_pending() becomes true (the old handler
+                    // has already exited via shutdown() or SO_RCVTIMEO), we want to trigger
+                    // waitForRequest() promptly so JS reconnects and picks up the queued edit.
+                    const STUCK_TIMEOUT: std::time::Duration =
+                        std::time::Duration::from_millis(500);
                     let stuck_since = self
                         .edits_stuck_since
                         .get_or_insert_with(std::time::Instant::now);
