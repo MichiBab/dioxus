@@ -554,6 +554,7 @@ impl WebviewInstance {
                 .poll_new_edits_location(&mut cx)
                 .is_ready()
             {
+                eprintln!("DBG-FREEZE: in poll new edits location is ready");
                 _ = self.desktop_context.webview.evaluate_script(&format!(
                     "window.interpreter.waitForRequest(\"{edits_path}\", \"{expected_key}\");",
                     edits_path = self.edits.wry_queue.edits_path(),
@@ -564,6 +565,7 @@ impl WebviewInstance {
             // If we're waiting for a render, wait for it to finish before we continue
             let edits_flushed_poll = self.edits.wry_queue.poll_edits_flushed(&mut cx);
             if edits_flushed_poll.is_pending() {
+                eprintln!("DBG-FREEZE: edits flushed is pending, waiting for flush to complete");
                 return;
             }
 
@@ -573,10 +575,15 @@ impl WebviewInstance {
                 let _lock = crate::android_sync_lock::android_runtime_lock();
                 let fut = self.dom.wait_for_work();
                 pin_mut!(fut);
-
+                eprintln!("DBG-FREEZE: going into fut poll_unpin");
                 match fut.poll_unpin(&mut cx) {
-                    std::task::Poll::Ready(_) => {}
-                    std::task::Poll::Pending => return,
+                    std::task::Poll::Ready(_) => {
+                        eprintln!("DBG-FREEZE: fut is ready, continuing loop to check for edits");
+                    }
+                    std::task::Poll::Pending => {
+                        eprintln!("DBG-FREEZE: fut is pending, waiting for work");
+                        return;
+                    }
                 }
             }
 
@@ -588,6 +595,7 @@ impl WebviewInstance {
                 .wry_queue
                 .with_mutation_state_mut(|f| self.dom.render_immediate(f));
             self.edits.wry_queue.send_edits();
+            eprintln!("DBG-FREEZE: sent edits to webview");
         }
     }
 

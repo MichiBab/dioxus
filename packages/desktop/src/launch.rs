@@ -17,6 +17,7 @@ pub fn launch_virtual_dom_blocking(virtual_dom: VirtualDom, mut desktop_config: 
     let (event_loop, mut app) = App::new(desktop_config, virtual_dom);
 
     event_loop.run(move |window_event, event_loop, control_flow| {
+        eprintln!("DBG-FREEZE: Received event: {:?}", window_event);
         // Set the control flow and check if any events need to be handled in the app itself
         app.tick(&window_event);
 
@@ -100,6 +101,10 @@ pub fn launch_virtual_dom_blocking(virtual_dom: VirtualDom, mut desktop_config: 
             _ => {}
         }
 
+        eprintln!(
+            "DBG-FREEZE: Setting control flow to: {:?}",
+            app.control_flow
+        );
         *control_flow = app.control_flow;
     })
 }
