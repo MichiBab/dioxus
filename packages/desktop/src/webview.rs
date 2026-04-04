@@ -575,27 +575,36 @@ impl WebviewInstance {
             if edits_flushed_poll.is_pending() {
                 eprintln!("DBG-FREEZE: edits flushed is pending, waiting for flush to complete");
 
-                // Android: if the edits flush has been stuck for more than 3 seconds the
-                // WebSocket connection to the WebView was likely silently broken during a
-                // background/foreground transition.  Reset the pending state and send a
-                // reconnect signal so the WebView re-establishes the channel.
+                // Android only: if the edits flush has been stuck for more than 3 seconds it
+                // is likely that the WebSocket connection died silently (the TCP read timeout in
+                // the handler thread is 10 s, so after that the handler will exit and transition
+                // the connection back to Pending, re-queuing the in-flight edits).
+                //
+                // Strategy: DO NOT clear edits_in_progress or re-poll the VirtualDom here –
+                // that would cause a DOM state desync.  Instead, wait until the Rust-side
+                // connection transitions to Pending (handler exited), THEN call waitForRequest()
+                // so JS reconnects to the now-Pending server and the original queued edits are
+                // delivered and ACK'd naturally.
                 #[cfg(target_os = "android")]
                 {
                     const STUCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
                     let stuck_since = self
                         .edits_stuck_since
                         .get_or_insert_with(std::time::Instant::now);
-                    if stuck_since.elapsed() >= STUCK_TIMEOUT {
-                        eprintln!("DBG-FREEZE: edits flush timed out after 3s – reconnecting WebView WebSocket");
-                        self.edits.wry_queue.clear_edits_in_progress();
+                    if stuck_since.elapsed() >= STUCK_TIMEOUT
+                        && self.edits.wry_queue.is_connection_pending()
+                    {
+                        // The handler thread has already exited and re-queued the stale edits in
+                        // the Pending state.  Tell JS to reconnect so those edits are delivered.
+                        eprintln!(
+                            "DBG-FREEZE: WS connection dropped (Pending) – triggering JS reconnect"
+                        );
                         self.edits_stuck_since = None;
                         _ = self.desktop_context.webview.evaluate_script(&format!(
                             "window.interpreter.waitForRequest(\"{edits_path}\", \"{expected_key}\");",
                             edits_path = self.edits.wry_queue.edits_path(),
                             expected_key = self.edits.wry_queue.required_server_key()
                         ));
-                        // Fall through to re-poll the VirtualDom this iteration.
-                        continue;
                     }
                 }
 
