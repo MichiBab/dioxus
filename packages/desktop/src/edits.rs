@@ -242,7 +242,7 @@ impl EditWebsocket {
         // replacement connection arrives (see below), which unblocks the handler in <100 ms;
         // this timeout is only reached when JS never reconnects at all (e.g. very deep doze).
         #[cfg(target_os = "android")]
-        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
 
         // Clone the stream descriptor BEFORE handing it to tungstenite.  We keep this clone in
         // the connection state so that when a replacement arrives we can call shutdown(Both) to
@@ -357,35 +357,38 @@ impl EditWebsocket {
                         match websocket.read() {
                             Ok(tungstenite::Message::Binary(_)) => break 'ack true,
                             Ok(tungstenite::Message::Close(_)) => break 'ack false,
-                            // SO_RCVTIMEO fired (EAGAIN/WouldBlock), handle_connection
-                            // called shutdown() on our TCP stream, or the syscall was
-                            // interrupted by a signal (EINTR / os error 4).  EINTR must
-                            // always be retried; WouldBlock/EAGAIN means check superseded.
+                            // EINTR (os error 4): a signal interrupted the syscall.  This is
+                            // completely transient – always retry immediately.
                             Err(tungstenite::Error::Io(ref io_err))
-                                if io_err.kind() == std::io::ErrorKind::WouldBlock
-                                    || io_err.kind() == std::io::ErrorKind::Interrupted
-                                    || io_err.raw_os_error() == Some(11)
+                                if io_err.kind() == std::io::ErrorKind::Interrupted
                                     || io_err.raw_os_error() == Some(4) =>
                             {
-                                let superseded = {
-                                    let conns = connections_.read().unwrap();
-                                    match conns.get(&location.webview_id) {
-                                        Some(WebviewConnectionState::Connected {
-                                            connection_id: active_id,
-                                            ..
-                                        }) => *active_id != connection_id,
-                                        _ => true, // Pending or absent → replaced
-                                    }
-                                };
-                                if superseded {
-                                    eprintln!(
-                                        "DBG-FREEZE: WS handler {} detected superseded – exiting ACK wait",
-                                        connection_id
-                                    );
-                                    break 'ack false;
-                                }
-                                // Not superseded – the WebView may just be slow. Keep waiting.
                                 continue;
+                            }
+                            // SO_RCVTIMEO fired (EAGAIN/WouldBlock, os error 11) or
+                            // handle_connection called shutdown() on our TCP stream.
+                            //
+                            // SO_RCVTIMEO is set to 3 s.  If we reach here the WebView has
+                            // not ACK'd within the timeout window – it is either dead or the
+                            // process was frozen by Android and resumed long after the deadline
+                            // passed.  Either way: give up, break out, and let the state
+                            // transition to Pending so waitForRequest() triggers a reconnect.
+                            //
+                            // We must NOT loop here.  Before this fix, looping with a
+                            // "not-superseded → keep waiting" check caused a permanent deadlock
+                            // when Android resumed the process: the deadline had already expired
+                            // so WouldBlock fired immediately, the state stayed Connected
+                            // forever, and is_connection_pending() was never true so
+                            // waitForRequest() never fired.
+                            Err(tungstenite::Error::Io(ref io_err))
+                                if io_err.kind() == std::io::ErrorKind::WouldBlock
+                                    || io_err.raw_os_error() == Some(11) =>
+                            {
+                                eprintln!(
+                                    "DBG-FREEZE: WS handler {} ACK timeout/shutdown – exiting ACK wait",
+                                    connection_id
+                                );
+                                break 'ack false;
                             }
                             Err(e) => {
                                 eprintln!(
@@ -530,7 +533,7 @@ enum WebviewConnectionState {
         /// A clone of the underlying TCP stream.  Calling `shutdown(Both)` on this
         /// immediately unblocks any `websocket.read()` that the old handler thread is
         /// blocking on, so it can detect it was superseded and forward its in-flight edit
-        /// to the new connection rather than waiting up to 10 s for a SO_RCVTIMEO.
+        /// to the new connection rather than waiting up to 3 s for a SO_RCVTIMEO.
         shutdown_stream: std::sync::Arc<TcpStream>,
     },
 }
