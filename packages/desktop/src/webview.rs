@@ -201,12 +201,6 @@ pub(crate) struct WebviewInstance {
     pub desktop_context: DesktopContext,
     pub waker: Waker,
 
-    /// Tracks when we last called `send_edits` so we can detect a stalled
-    /// edits-flush (i.e. the WebSocket to the WebView was silently dropped)
-    /// and recover by re-triggering the WebView's reconnect handshake.
-    #[cfg(target_os = "android")]
-    edits_stuck_since: Option<std::time::Instant>,
-
     // Wry assumes the webcontext is alive for the lifetime of the webview.
     // We need to keep the webcontext alive, otherwise the webview will crash
     _web_context: WebContext,
@@ -537,8 +531,6 @@ impl WebviewInstance {
             edits,
             waker: tao_waker(shared.proxy.clone(), desktop_context.window.id()),
             desktop_context,
-            #[cfg(target_os = "android")]
-            edits_stuck_since: None,
             _menu: menu,
             _web_context: web_context,
         }
@@ -570,54 +562,24 @@ impl WebviewInstance {
                 ));
             }
 
+            // On Android, detect stale ACKs caused by dead/frozen WebSocket.
+            // Trigger a JS-side WS reconnect. The edit is NOT cleared here — it
+            // will be re-sent through the new connection and ACKed for real.
+            #[cfg(target_os = "android")]
+            if self.edits.wry_queue.has_stale_edit() {
+                eprintln!("[VDOM] Stale ACK — triggering JS WebSocket reconnect");
+                _ = self.desktop_context.webview.evaluate_script(&format!(
+                    "window.interpreter.waitForRequest(\"{edits_path}\", \"{expected_key}\");",
+                    edits_path = self.edits.wry_queue.edits_path(),
+                    expected_key = self.edits.wry_queue.required_server_key()
+                ));
+            }
+
             // If we're waiting for a render, wait for it to finish before we continue
             let edits_flushed_poll = self.edits.wry_queue.poll_edits_flushed(&mut cx);
             if edits_flushed_poll.is_pending() {
                 eprintln!("DBG-FREEZE: edits flushed is pending, waiting for flush to complete");
-
-                // Android only: if the edits flush has been stuck for more than 3 seconds it
-                // is likely that the WebSocket connection died silently (the TCP read timeout in
-                // the handler thread is 10 s, so after that the handler will exit and transition
-                // the connection back to Pending, re-queuing the in-flight edits).
-                //
-                // Strategy: DO NOT clear edits_in_progress or re-poll the VirtualDom here –
-                // that would cause a DOM state desync.  Instead, wait until the Rust-side
-                // connection transitions to Pending (handler exited), THEN call waitForRequest()
-                // so JS reconnects to the now-Pending server and the original queued edits are
-                // delivered and ACK'd naturally.
-                #[cfg(target_os = "android")]
-                {
-                    // 500 ms: once is_connection_pending() becomes true (the old handler
-                    // has already exited via shutdown() or SO_RCVTIMEO), we want to trigger
-                    // waitForRequest() promptly so JS reconnects and picks up the queued edit.
-                    const STUCK_TIMEOUT: std::time::Duration =
-                        std::time::Duration::from_millis(500);
-                    let stuck_since = self
-                        .edits_stuck_since
-                        .get_or_insert_with(std::time::Instant::now);
-                    if stuck_since.elapsed() >= STUCK_TIMEOUT
-                        && self.edits.wry_queue.is_connection_pending()
-                    {
-                        // The handler thread has already exited and re-queued the stale edits in
-                        // the Pending state.  Tell JS to reconnect so those edits are delivered.
-                        eprintln!(
-                            "DBG-FREEZE: WS connection dropped (Pending) – triggering JS reconnect"
-                        );
-                        self.edits_stuck_since = None;
-                        _ = self.desktop_context.webview.evaluate_script(&format!(
-                            "window.interpreter.waitForRequest(\"{edits_path}\", \"{expected_key}\");",
-                            edits_path = self.edits.wry_queue.edits_path(),
-                            expected_key = self.edits.wry_queue.required_server_key()
-                        ));
-                    }
-                }
-
                 return;
-            }
-            // Edits were flushed – clear the stuck timer.
-            #[cfg(target_os = "android")]
-            {
-                self.edits_stuck_since = None;
             }
 
             {
@@ -647,11 +609,6 @@ impl WebviewInstance {
                 .with_mutation_state_mut(|f| self.dom.render_immediate(f));
             self.edits.wry_queue.send_edits();
             eprintln!("DBG-FREEZE: sent edits to webview");
-            // Start tracking how long we wait for the flush acknowledgement.
-            #[cfg(target_os = "android")]
-            {
-                self.edits_stuck_since = Some(std::time::Instant::now());
-            }
         }
     }
 
