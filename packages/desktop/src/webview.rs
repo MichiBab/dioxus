@@ -562,6 +562,19 @@ impl WebviewInstance {
                 ));
             }
 
+            // On Android, detect stale ACKs caused by dead/frozen WebSocket.
+            // Trigger a JS-side WS reconnect. The edit is NOT cleared here — it
+            // will be re-sent through the new connection and ACKed for real.
+            #[cfg(target_os = "android")]
+            if self.edits.wry_queue.has_stale_edit() {
+                eprintln!("[VDOM] Stale ACK — triggering JS WebSocket reconnect");
+                _ = self.desktop_context.webview.evaluate_script(&format!(
+                    "window.interpreter.waitForRequest(\"{edits_path}\", \"{expected_key}\");",
+                    edits_path = self.edits.wry_queue.edits_path(),
+                    expected_key = self.edits.wry_queue.required_server_key()
+                ));
+            }
+
             // If we're waiting for a render, wait for it to finish before we continue
             let edits_flushed_poll = self.edits.wry_queue.poll_edits_flushed(&mut cx);
             if edits_flushed_poll.is_pending() {

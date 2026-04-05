@@ -30,6 +30,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::atomic::AtomicU32;
 use std::sync::Mutex;
+use std::time::Instant;
 use std::{
     net::IpAddr,
     sync::{Arc, RwLock},
@@ -58,6 +59,40 @@ impl WryQueue {
         let serialized_edits = myself.mutation_state.export_memory();
         let receiver = myself.websocket.send_edits(webview_id, serialized_edits);
         myself.edits_in_progress = Some(receiver);
+        myself.edit_sent_at = Some(Instant::now());
+    }
+
+    /// Check if the current in-progress edit has been pending long enough to
+    /// indicate the WebSocket is dead. Returns `true` if a reconnect should be
+    /// triggered (debounced: at most once per 3 s). Does NOT clear
+    /// `edits_in_progress` — the edit will be re-sent through the new connection
+    /// and the original oneshot will resolve naturally.
+    #[cfg(target_os = "android")]
+    pub(crate) fn has_stale_edit(&self) -> bool {
+        const STALE_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(1500);
+        const RECONNECT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(3);
+        match self.inner.try_borrow_mut() {
+            Ok(mut inner) => {
+                if let Some(sent_at) = inner.edit_sent_at {
+                    if inner.edits_in_progress.is_some() && sent_at.elapsed() >= STALE_THRESHOLD {
+                        // Debounce: don't spam JS reconnects
+                        if let Some(last) = inner.reconnect_triggered_at {
+                            if last.elapsed() < RECONNECT_COOLDOWN {
+                                return false;
+                            }
+                        }
+                        eprintln!(
+                            "[EDITS] Stale ACK detected ({}ms) — triggering WS reconnect",
+                            sent_at.elapsed().as_millis()
+                        );
+                        inner.reconnect_triggered_at = Some(Instant::now());
+                        return true;
+                    }
+                }
+            }
+            Err(_) => {} // mid-render re-entrancy — skip
+        }
+        false
     }
 
     /// Wait until all pending edits have been rendered in the webview
@@ -67,7 +102,16 @@ impl WryQueue {
     ) -> std::task::Poll<()> {
         let mut self_mut = self.inner.borrow_mut();
         if let Some(receiver) = self_mut.edits_in_progress.as_mut() {
-            receiver.poll_unpin(cx).map(|_| ())
+            match receiver.poll_unpin(cx).map(|_| ()) {
+                std::task::Poll::Ready(()) => {
+                    // ACK received — clear so check_and_reset_stale_edit
+                    // doesn't mistake this resolved receiver for a stale one.
+                    self_mut.edits_in_progress = None;
+                    self_mut.edit_sent_at = None;
+                    std::task::Poll::Ready(())
+                }
+                std::task::Poll::Pending => std::task::Poll::Pending,
+            }
         } else {
             std::task::Poll::Ready(())
         }
@@ -116,6 +160,10 @@ pub(crate) struct WryQueueInner {
     websocket: EditWebsocket,
     // If this webview is currently waiting for an edit to be flushed. We don't run the virtual dom while this is true to avoid running effects before the dom has been updated
     edits_in_progress: Option<oneshot::Receiver<()>>,
+    /// When the current edit batch was dispatched (for stale ACK detection)
+    edit_sent_at: Option<Instant>,
+    /// When we last triggered a JS WebSocket reconnect (debounce)
+    reconnect_triggered_at: Option<Instant>,
     // The socket may be killed by the OS while running. If it does, this channel will receive the new server location
     server_location_changed: Arc<Notify>,
     server_location_changed_future: Pin<Box<dyn Future<Output = ()>>>,
@@ -303,6 +351,20 @@ impl EditWebsocket {
         let connections_ = connections.clone();
         // Spawn a task to handle the websocket connection
         std::thread::spawn(move || {
+            // On Android, set a read timeout so the handler thread exits cleanly
+            // when the WebSocket is frozen (e.g. Android backgrounding).  The
+            // microtask ACK normally arrives in <20ms, so 1s is very generous.
+            #[cfg(target_os = "android")]
+            {
+                use std::time::Duration;
+                if let Err(e) = websocket
+                    .get_mut()
+                    .set_read_timeout(Some(Duration::from_millis(1000)))
+                {
+                    tracing::warn!("Failed to set WS read timeout: {e}");
+                }
+            }
+
             let mut queued_message = None;
             // Wait until there are edits ready to send
             'connection: while let Ok(msg) = edits_incoming_rx.recv() {
@@ -314,19 +376,33 @@ impl EditWebsocket {
                     break 'connection;
                 }
 
-                // Wait for the webview to apply the edits
-                while let Ok(ws_msg) = websocket.read() {
-                    match ws_msg {
-                        // We expect the webview to send a binary message when it has applied the edits
-                        // This is a signal that we can continue processing
-                        tungstenite::Message::Binary(_) => break,
-                        // If the websocket closes, switch back to the pending state and
-                        // re-queue the edits that haven't been acknowledged yet
-                        tungstenite::Message::Close(_) => {
-                            break 'connection;
+                // Wait for the webview to ACK the edits.
+                // Properly distinguish ACK (binary), close, timeout, and errors.
+                let got_ack = loop {
+                    match websocket.read() {
+                        Ok(tungstenite::Message::Binary(_)) => break true,
+                        Ok(tungstenite::Message::Close(_)) => break false,
+                        Ok(_) => continue,
+                        // Timeout / WouldBlock from SO_RCVTIMEO — WS is likely dead
+                        Err(tungstenite::Error::Io(ref e))
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::TimedOut =>
+                        {
+                            break false
                         }
-                        _ => {}
+                        // EINTR — just retry
+                        Err(tungstenite::Error::Io(ref e))
+                            if e.kind() == std::io::ErrorKind::Interrupted =>
+                        {
+                            continue
+                        }
+                        Err(_) => break false,
                     }
+                };
+
+                if !got_ack {
+                    // Edit was NOT applied — keep it in queued_message for re-queue
+                    break 'connection;
                 }
 
                 let msg = queued_message.take().expect("Message should be set here");
@@ -336,15 +412,29 @@ impl EditWebsocket {
                     tracing::error!("Error sending edits applied notification");
                 }
             }
-            tracing::trace!("Webview {} closed the connection", location.webview_id);
-            let mut connection = WebviewConnectionState::default();
-            if let Some(msg) = queued_message {
-                connection.add_message_pair(msg);
+            tracing::trace!("Webview {} handler exiting", location.webview_id);
+
+            // Re-queue any un-ACKed edit.  If a new connection already replaced
+            // us, forward the message through it instead of overwriting.
+            let mut guard = connections_.write().unwrap();
+            let is_replaced = matches!(
+                guard.get(&location.webview_id),
+                Some(WebviewConnectionState::Connected { .. })
+            );
+            if is_replaced {
+                // New connection active — forward queued message through it
+                if let Some(msg) = queued_message {
+                    if let Some(conn) = guard.get_mut(&location.webview_id) {
+                        conn.add_message_pair(msg);
+                    }
+                }
+            } else {
+                let mut pending = WebviewConnectionState::default();
+                if let Some(msg) = queued_message {
+                    pending.add_message_pair(msg);
+                }
+                guard.insert(location.webview_id, pending);
             }
-            connections_
-                .write()
-                .unwrap()
-                .insert(location.webview_id, connection);
         });
 
         let mut connections = connections.write().unwrap();
@@ -356,14 +446,16 @@ impl EditWebsocket {
                 }
             }
 
-            // If the webview was already connected, never send edits from the old connection to
-            // the new connection. This should never happen
+            // The old connection is being replaced (e.g. Android backgrounding froze
+            // the WebSocket and JS reconnected).  The old Sender is dropped by
+            // remove() above, causing the old handler thread's recv() to return
+            // Err on its next iteration, so it will exit and re-queue any
+            // un-ACKed edit through the new connection.
             Some(WebviewConnectionState::Connected { .. }) => {
-                tracing::error!(
-                    "Webview {} was already connected. Rejecting new connection.",
+                tracing::warn!(
+                    "Webview {} replacing stale connection with new one.",
                     location.webview_id
                 );
-                return;
             }
 
             None => {}
@@ -388,6 +480,8 @@ impl EditWebsocket {
                 location: WebviewWebsocketLocation { webview_id, server },
                 websocket: self.clone(),
                 edits_in_progress: None,
+                edit_sent_at: None,
+                reconnect_triggered_at: None,
                 mutation_state: MutationState::default(),
             })),
         }
@@ -440,7 +534,15 @@ impl WebviewConnectionState {
                 queue.push_back(pair);
             }
             WebviewConnectionState::Connected { edits_outgoing } => {
-                _ = edits_outgoing.send(pair);
+                // If the handler thread has exited (receiver dropped), the send
+                // fails.  Recover the message and convert to Pending so it can
+                // be forwarded through the next connection instead of being lost.
+                if let Err(std::sync::mpsc::SendError(pair)) = edits_outgoing.send(pair) {
+                    tracing::warn!("Edit channel dead — re-queuing message as Pending");
+                    *self = WebviewConnectionState::Pending {
+                        pending: VecDeque::from([pair]),
+                    };
+                }
             }
         }
     }

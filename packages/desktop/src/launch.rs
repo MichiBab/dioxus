@@ -6,6 +6,8 @@ use crate::{
 use dioxus_core::*;
 use dioxus_document::eval;
 use std::any::Any;
+#[cfg(target_os = "android")]
+use std::time::{Duration, Instant};
 use tao::event::{Event, StartCause, WindowEvent};
 
 /// Launch the WebView and run the event loop, with configuration and root props.
@@ -27,6 +29,16 @@ pub fn launch_virtual_dom_blocking(virtual_dom: VirtualDom, mut desktop_config: 
 
         match window_event {
             Event::NewEvents(StartCause::Init) => app.handle_start_cause_init(),
+            // Android: the event loop woke because our WaitUntil deadline elapsed without any
+            // other event. Re-send Poll to every live window so the VirtualDom is polled even
+            // if earlier waker-based Poll messages were silently dropped by the Android Looper.
+            #[cfg(target_os = "android")]
+            Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
+                let ids: Vec<_> = app.webviews.keys().copied().collect();
+                for id in ids {
+                    _ = app.shared.proxy.send_event(UserWindowEvent::Poll(id));
+                }
+            }
             Event::LoopDestroyed => app.handle_loop_destroyed(),
             Event::WindowEvent {
                 event, window_id, ..
@@ -105,7 +117,21 @@ pub fn launch_virtual_dom_blocking(virtual_dom: VirtualDom, mut desktop_config: 
             "DBG-FREEZE: Setting control flow to: {:?}",
             app.control_flow
         );
-        *control_flow = app.control_flow;
+        // On Android, never sleep indefinitely: cap the wait at 500 ms so that
+        // even if waker-based Poll events are dropped by the Android Looper the
+        // event loop will still wake up and re-kick the VirtualDom.
+        #[cfg(target_os = "android")]
+        if app.control_flow != tao::event_loop::ControlFlow::Exit {
+            *control_flow = tao::event_loop::ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(500),
+            );
+        } else {
+            *control_flow = app.control_flow;
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            *control_flow = app.control_flow;
+        }
     })
 }
 
