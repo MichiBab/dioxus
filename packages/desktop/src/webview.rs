@@ -201,6 +201,11 @@ pub(crate) struct WebviewInstance {
     pub desktop_context: DesktopContext,
     pub waker: Waker,
 
+    /// Track how long `wait_for_work` has been continuously Pending.
+    /// Used on Android to detect stale tokio wakers after device resume.
+    #[cfg(target_os = "android")]
+    idle_since: Option<std::time::Instant>,
+
     // Wry assumes the webcontext is alive for the lifetime of the webview.
     // We need to keep the webcontext alive, otherwise the webview will crash
     _web_context: WebContext,
@@ -533,6 +538,8 @@ impl WebviewInstance {
             desktop_context,
             _menu: menu,
             _web_context: web_context,
+            #[cfg(target_os = "android")]
+            idle_since: None,
         }
     }
 
@@ -586,15 +593,47 @@ impl WebviewInstance {
                 // lock the hack-ed in lock sync wry has some thread-safety issues with event handlers and async tasks
                 #[cfg(target_os = "android")]
                 let _lock = crate::android_sync_lock::android_runtime_lock();
+
+                // On Android, if the VirtualDom has been idle (wait_for_work
+                // returning Pending) for more than 3 seconds, force all tasks
+                // back into the dirty queue.  After resuming from deep sleep,
+                // tokio timer wakers may silently fail to fire.  Re-polling a
+                // tokio::time::sleep whose deadline has passed returns Ready
+                // immediately — even if the waker was never called.
+                #[cfg(target_os = "android")]
+                {
+                    if let Some(since) = self.idle_since {
+                        if since.elapsed() > std::time::Duration::from_secs(5) {
+                            eprintln!(
+                                "DBG-FREEZE: VirtualDom idle for {}s — force-polling all tasks",
+                                since.elapsed().as_secs()
+                            );
+                            self.dom.force_poll_all_tasks();
+                            // process_events will drain the TaskNotified messages
+                            // we just enqueued and poll the tasks immediately.
+                            self.dom.process_events();
+                            self.idle_since = Some(std::time::Instant::now());
+                        }
+                    }
+                }
+
                 let fut = self.dom.wait_for_work();
                 pin_mut!(fut);
                 eprintln!("DBG-FREEZE: going into fut poll_unpin");
                 match fut.poll_unpin(&mut cx) {
                     std::task::Poll::Ready(_) => {
                         eprintln!("DBG-FREEZE: fut is ready, continuing loop to check for edits");
+                        #[cfg(target_os = "android")]
+                        {
+                            self.idle_since = None;
+                        }
                     }
                     std::task::Poll::Pending => {
                         eprintln!("DBG-FREEZE: fut is pending, waiting for work");
+                        #[cfg(target_os = "android")]
+                        if self.idle_since.is_none() {
+                            self.idle_since = Some(std::time::Instant::now());
+                        }
                         return;
                     }
                 }

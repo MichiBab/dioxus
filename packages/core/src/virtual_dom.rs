@@ -537,6 +537,23 @@ impl VirtualDom {
         }
     }
 
+    /// Force all live tasks back into the dirty-task queue so they are
+    /// re-polled on the next `process_events()` / `wait_for_work()` call.
+    ///
+    /// This is needed on Android where tokio timer wakers may silently fail
+    /// to fire after the device resumes from deep sleep.  Re-polling a
+    /// `tokio::time::sleep` whose deadline has passed returns `Ready`
+    /// immediately even if the waker was never called.
+    pub fn force_poll_all_tasks(&mut self) {
+        let task_ids: Vec<slotmap::DefaultKey> = self.runtime.tasks.borrow().keys().collect();
+        for id in task_ids {
+            let _ = self
+                .runtime
+                .sender
+                .unbounded_send(SchedulerMsg::TaskNotified(id));
+        }
+    }
+
     /// Rebuild the virtualdom without handling any of the mutations
     ///
     /// This is useful for testing purposes and in cases where you render the output of the virtualdom without
