@@ -52,14 +52,17 @@ impl WryQueue {
         callback(&mut inner.mutation_state)
     }
 
-    /// Send a list of mutations to the webview
-    pub(crate) fn send_edits(&self) {
+    /// Send a list of mutations to the webview.
+    /// Returns `true` if the edit channel is dead (message queued for reconnect).
+    pub(crate) fn send_edits(&self) -> bool {
         let mut myself = self.inner.borrow_mut();
         let webview_id = myself.location.webview_id;
         let serialized_edits = myself.mutation_state.export_memory();
         let receiver = myself.websocket.send_edits(webview_id, serialized_edits);
+        let channel_dead = myself.websocket.is_pending(webview_id);
         myself.edits_in_progress = Some(receiver);
         myself.edit_sent_at = Some(Instant::now());
+        channel_dead
     }
 
     /// Check if the current in-progress edit has been pending long enough to
@@ -69,7 +72,7 @@ impl WryQueue {
     /// and the original oneshot will resolve naturally.
     #[cfg(target_os = "android")]
     pub(crate) fn has_stale_edit(&self) -> bool {
-        const STALE_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(1500);
+        const STALE_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(500);
         const RECONNECT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(3);
         match self.inner.try_borrow_mut() {
             Ok(mut inner) => {
@@ -115,6 +118,17 @@ impl WryQueue {
         } else {
             std::task::Poll::Ready(())
         }
+    }
+
+    /// Clear the in-progress edit tracking.  Used when the edit channel is dead
+    /// and the message has been safely queued in the Pending list — we don't
+    /// want to block the render loop waiting for an ACK that can only arrive
+    /// after JS reconnects.
+    #[cfg(target_os = "android")]
+    pub(crate) fn clear_edits_in_progress(&self) {
+        let mut inner = self.inner.borrow_mut();
+        inner.edits_in_progress = None;
+        inner.edit_sent_at = None;
     }
 
     /// Check if there is a new location for the websocket edits server.
@@ -414,6 +428,14 @@ impl EditWebsocket {
             }
             tracing::trace!("Webview {} handler exiting", location.webview_id);
 
+            // Drop the receiver *before* touching the connections map.
+            // This ensures that if the Connected state still holds OUR sender,
+            // any attempt to send through it will fail (receiver gone),
+            // correctly triggering the Pending conversion inside
+            // add_message_pair instead of silently buffering the message
+            // into a channel that is about to be destroyed.
+            drop(edits_incoming_rx);
+
             // Re-queue any un-ACKed edit.  If a new connection already replaced
             // us, forward the message through it instead of overwriting.
             let mut guard = connections_.write().unwrap();
@@ -422,18 +444,30 @@ impl EditWebsocket {
                 Some(WebviewConnectionState::Connected { .. })
             );
             if is_replaced {
-                // New connection active — forward queued message through it
+                // A Connected state exists. Because we dropped our receiver
+                // above, sending through our old sender will fail and
+                // add_message_pair will convert it to Pending. If a *new*
+                // connection replaced ours, the send succeeds and the message
+                // is forwarded correctly.
                 if let Some(msg) = queued_message {
                     if let Some(conn) = guard.get_mut(&location.webview_id) {
                         conn.add_message_pair(msg);
                     }
                 }
             } else {
-                let mut pending = WebviewConnectionState::default();
+                // State is already Pending (main thread converted it via a
+                // failed send). Merge our queued message into the existing
+                // queue instead of overwriting it and losing the main
+                // thread's messages.
                 if let Some(msg) = queued_message {
-                    pending.add_message_pair(msg);
+                    if let Some(conn) = guard.get_mut(&location.webview_id) {
+                        conn.add_message_pair(msg);
+                    } else {
+                        let mut pending = WebviewConnectionState::default();
+                        pending.add_message_pair(msg);
+                        guard.insert(location.webview_id, pending);
+                    }
                 }
-                guard.insert(location.webview_id, pending);
             }
         });
 
@@ -491,6 +525,16 @@ impl EditWebsocket {
         let mut connections_mut = self.connections.write().unwrap();
         let connection = connections_mut.entry(webview).or_default();
         connection.add_message(edits)
+    }
+
+    /// Check if the connection for a given webview is in the Pending state
+    /// (i.e. the handler thread exited and no live WebSocket connection exists).
+    fn is_pending(&self, webview: u32) -> bool {
+        let connections = self.connections.read().unwrap();
+        matches!(
+            connections.get(&webview),
+            Some(WebviewConnectionState::Pending { .. }) | None
+        )
     }
 }
 

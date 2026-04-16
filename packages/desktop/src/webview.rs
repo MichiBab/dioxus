@@ -607,8 +607,25 @@ impl WebviewInstance {
             self.edits
                 .wry_queue
                 .with_mutation_state_mut(|f| self.dom.render_immediate(f));
-            self.edits.wry_queue.send_edits();
+            let _channel_dead = self.edits.wry_queue.send_edits();
             eprintln!("DBG-FREEZE: sent edits to webview");
+
+            // On Android, if the edit channel is dead (message went to the
+            // Pending queue), trigger an immediate JS WebSocket reconnect.
+            // The edits are safely queued and will be sent through the new
+            // connection once JS reconnects. Clear edits_in_progress so the
+            // render loop can continue processing VDom work instead of
+            // blocking forever on an ACK that requires the reconnect first.
+            #[cfg(target_os = "android")]
+            if _channel_dead {
+                eprintln!("[VDOM] Edit channel dead after send — immediate JS WS reconnect");
+                _ = self.desktop_context.webview.evaluate_script(&format!(
+                    "window.interpreter.waitForRequest(\"{edits_path}\", \"{expected_key}\");",
+                    edits_path = self.edits.wry_queue.edits_path(),
+                    expected_key = self.edits.wry_queue.required_server_key()
+                ));
+                self.edits.wry_queue.clear_edits_in_progress();
+            }
         }
     }
 

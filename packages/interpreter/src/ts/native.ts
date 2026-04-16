@@ -491,6 +491,8 @@ export class NativeInterpreter extends JSChannel_ {
         // requestAnimationFrame.  Android throttles RAF when the app is
         // backgrounded, which stalls the ACK and freezes the VirtualDom.
         data.arrayBuffer().then((buffer) => {
+          // If this WS was replaced while the microtask was queued, skip.
+          if (this.edits !== ws) return;
           // @ts-ignore
           this.run_from_bytes(buffer);
           this.markEditsFinished();
@@ -508,7 +510,13 @@ export class NativeInterpreter extends JSChannel_ {
   markEditsFinished() {
     // Send an empty ArrayBuffer to the edits websocket to signal that the edits are finished
     // This is used to signal that the edits are done and the next request can be processed
-    this.edits.send(new ArrayBuffer(0));
+    try {
+      this.edits.send(new ArrayBuffer(0));
+    } catch (e) {
+      // WebSocket may be in CLOSING/CLOSED state (e.g. Android froze the app).
+      // Swallow the InvalidStateError — the Rust side will detect the missing
+      // ACK via stale-edit detection and trigger a reconnect.
+    }
   }
 
   kickAllStylesheetsOnPage() {
