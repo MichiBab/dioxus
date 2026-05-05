@@ -6,6 +6,8 @@ use crate::{
 use dioxus_core::*;
 use dioxus_document::eval;
 use std::any::Any;
+#[cfg(target_os = "android")]
+use std::time::{Duration, Instant};
 use tao::event::{Event, StartCause, WindowEvent};
 
 /// Launch the WebView and run the event loop, with configuration and root props.
@@ -17,6 +19,7 @@ pub fn launch_virtual_dom_blocking(virtual_dom: VirtualDom, mut desktop_config: 
     let (event_loop, mut app) = App::new(desktop_config, virtual_dom);
 
     event_loop.run(move |window_event, event_loop, control_flow| {
+        eprintln!("DBG-FREEZE: Received event: {:?}", window_event);
         // Set the control flow and check if any events need to be handled in the app itself
         app.tick(&window_event);
 
@@ -26,7 +29,36 @@ pub fn launch_virtual_dom_blocking(virtual_dom: VirtualDom, mut desktop_config: 
 
         match window_event {
             Event::NewEvents(StartCause::Init) => app.handle_start_cause_init(),
+            // Android: the event loop woke because our WaitUntil deadline elapsed without any
+            // other event. Re-send Poll to every live window so the VirtualDom is polled even
+            // if earlier waker-based Poll messages were silently dropped by the Android Looper.
+            #[cfg(target_os = "android")]
+            Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
+                let ids: Vec<_> = app.webviews.keys().copied().collect();
+                for id in ids {
+                    _ = app.shared.proxy.send_event(UserWindowEvent::Poll(id));
+                }
+            }
             Event::LoopDestroyed => app.handle_loop_destroyed(),
+            // Android: when the app comes back to the foreground, proactively
+            // trigger a WebSocket reconnect for every live webview. The WS is
+            // almost certainly dead after a background freeze, and waiting for
+            // the stale-ACK timer adds unnecessary latency.
+            #[cfg(target_os = "android")]
+            Event::Resumed => {
+                eprintln!("[LAUNCH] Resumed event — forcing WS reconnect for all webviews");
+                for view in app.webviews.values() {
+                    _ = view.desktop_context.webview.evaluate_script(&format!(
+                        "window.interpreter.waitForRequest(\"{edits_path}\", \"{expected_key}\");",
+                        edits_path = view.edits.wry_queue.edits_path(),
+                        expected_key = view.edits.wry_queue.required_server_key()
+                    ));
+                }
+                let ids: Vec<_> = app.webviews.keys().copied().collect();
+                for id in ids {
+                    _ = app.shared.proxy.send_event(UserWindowEvent::Poll(id));
+                }
+            }
             Event::WindowEvent {
                 event, window_id, ..
             } => match event {
@@ -100,7 +132,25 @@ pub fn launch_virtual_dom_blocking(virtual_dom: VirtualDom, mut desktop_config: 
             _ => {}
         }
 
-        *control_flow = app.control_flow;
+        eprintln!(
+            "DBG-FREEZE: Setting control flow to: {:?}",
+            app.control_flow
+        );
+        // On Android, never sleep indefinitely: cap the wait at 500 ms so that
+        // even if waker-based Poll events are dropped by the Android Looper the
+        // event loop will still wake up and re-kick the VirtualDom.
+        #[cfg(target_os = "android")]
+        if app.control_flow != tao::event_loop::ControlFlow::Exit {
+            *control_flow = tao::event_loop::ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(500),
+            );
+        } else {
+            *control_flow = app.control_flow;
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            *control_flow = app.control_flow;
+        }
     })
 }
 
