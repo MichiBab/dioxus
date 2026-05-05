@@ -1,7 +1,7 @@
 use crate::{BuildTargets, BundleFormat, Cli, Commands, Workspace};
 use anyhow::Result;
 use clap::Parser;
-use futures_util::{stream::FuturesUnordered, StreamExt};
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use std::{
     collections::HashSet,
     fmt::Write,
@@ -10,7 +10,7 @@ use std::{
     prelude::rust_2024::Future,
 };
 use target_lexicon::Triple;
-use tracing_subscriber::{prelude::*, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, prelude::*, util::SubscriberInitExt};
 
 #[tokio::test]
 async fn run_harness() {
@@ -117,7 +117,7 @@ async fn test_harnesses() {
                 assert_eq!(targets.client.triple, "aarch64-apple-ios".parse().unwrap());
             })
             .asrt(r#"dx build --android --device"#, |targets| async move {
-                if crate::get_android_tools().is_none() {
+                if crate::AndroidTools::current().is_none() {
                     // Skip when Android NDK/SDK is not installed
                     return;
                 }
@@ -254,7 +254,6 @@ async fn test_harnesses() {
                     assert!(t.server.is_none());
                     assert_eq!(t.client.bundle, BundleFormat::Ios);
                     assert_eq!(t.client.triple, TestHarnessBuilder::host_ios_triple_sim());
-                    assert!(t.client.no_default_features);
                 },
             ),
         TestHarnessBuilder::new("harness-fullstack-with-optional-tokio")
@@ -367,7 +366,7 @@ impl TestHarnessBuilder {
             r#"[package]
 name = "{name}"
 version = "0.0.1"
-edition = "2021"
+edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
 

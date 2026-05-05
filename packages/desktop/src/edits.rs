@@ -28,8 +28,8 @@ use std::future::Future;
 use std::net::{TcpListener, TcpStream};
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::atomic::AtomicU32;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicU32;
 use std::time::Instant;
 use std::{
     net::IpAddr,
@@ -402,13 +402,13 @@ impl EditWebsocket {
                             if e.kind() == std::io::ErrorKind::WouldBlock
                                 || e.kind() == std::io::ErrorKind::TimedOut =>
                         {
-                            break false
+                            break false;
                         }
                         // EINTR — just retry
                         Err(tungstenite::Error::Io(ref e))
                             if e.kind() == std::io::ErrorKind::Interrupted =>
                         {
-                            continue
+                            continue;
                         }
                         Err(_) => break false,
                     }

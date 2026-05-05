@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
-    serve::{AppServer, ServeUpdate, WebServer},
     BuilderUpdate, BundleFormat, Result,
+    serve::{AppServer, ServeUpdate, WebServer},
 };
 use anyhow::bail;
 use dioxus_dx_wire_format::BuildStage;
@@ -83,12 +83,10 @@ impl RunArgs {
                                 total,
                                 krate,
                                 fresh,
-                            } => {
-                                if !fresh {
-                                    tracing::debug!(
-                                        "[{bundle_format}] ({current}/{total}) Compiling {krate} ",
-                                    )
-                                }
+                            } if !fresh => {
+                                tracing::debug!(
+                                    "[{bundle_format}] ({current}/{total}) Compiling {krate} ",
+                                )
                             }
                             BuildStage::RunningBindgen => {
                                 tracing::info!("[{bundle_format}] Running WASM bindgen")
@@ -161,6 +159,7 @@ impl RunArgs {
                         BuilderUpdate::ProcessWaitFailed { err } => {
                             return Err(err.into());
                         }
+                        BuilderUpdate::ProfilePhase { .. } => {}
                     }
                 }
                 ServeUpdate::Exit { .. } => break,

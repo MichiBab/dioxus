@@ -54,7 +54,7 @@ unsafe fn android_setup_with_ndk_context(
 }
 
 #[cfg(target_os = "android")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[inline(never)]
 pub extern "C" fn start_app() {
     use crate::Config;
