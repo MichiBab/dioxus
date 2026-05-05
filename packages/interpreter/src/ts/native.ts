@@ -458,29 +458,44 @@ export class NativeInterpreter extends JSChannel_ {
   }
 
   waitForRequest(editsPath: string, required_server_key: string) {
-    this.edits = new WebSocket(editsPath);
+    // Close old WebSocket so the Rust handler thread transitions from
+    // Connected → Pending before the new connection arrives.
+    if (this.edits) {
+      const old = this.edits;
+      old.onclose = null; // prevent reconnect loop from old WS
+      old.close();
+    }
+    const ws = new WebSocket(editsPath);
+    this.edits = ws;
     // Only trust the websocket once it sends us the required server key
     let authenticated = false;
-    // Reconnect if the websocket closes. This may happen on ios when the app is suspended
-    // in the background: https://github.com/DioxusLabs/dioxus/issues/4374
-    this.edits.onclose = () => {
+    // Reconnect if the websocket closes. This may happen on ios/android when
+    // the app is suspended in the background:
+    // https://github.com/DioxusLabs/dioxus/issues/4374
+    ws.onclose = () => {
       setTimeout(() => {
-        // If the edits path has changed, we don't want to reconnect to the old one
-        if (this.edits.url != editsPath) {
+        // Only reconnect if this WS is still the active one (identity check).
+        if (this.edits !== ws) {
           return;
         }
         this.waitForRequest(editsPath, required_server_key);
       }, 100);
     };
-    this.edits.onmessage = (event) => {
+    ws.onmessage = (event) => {
       const data = event.data;
       if (data instanceof Blob) {
         if (!authenticated) {
           return;
         }
-        // If the data is a blob, we need to convert it to an ArrayBuffer
+        // Apply edits and ACK in the microtask (Promise.then) instead of
+        // requestAnimationFrame.  Android throttles RAF when the app is
+        // backgrounded, which stalls the ACK and freezes the VirtualDom.
         data.arrayBuffer().then((buffer) => {
-          this.rafEdits(buffer);
+          // If this WS was replaced while the microtask was queued, skip.
+          if (this.edits !== ws) return;
+          // @ts-ignore
+          this.run_from_bytes(buffer);
+          this.markEditsFinished();
         });
       } else if (typeof data === "string") {
         if (data === required_server_key) {
@@ -495,7 +510,13 @@ export class NativeInterpreter extends JSChannel_ {
   markEditsFinished() {
     // Send an empty ArrayBuffer to the edits websocket to signal that the edits are finished
     // This is used to signal that the edits are done and the next request can be processed
-    this.edits.send(new ArrayBuffer(0));
+    try {
+      this.edits.send(new ArrayBuffer(0));
+    } catch (e) {
+      // WebSocket may be in CLOSING/CLOSED state (e.g. Android froze the app).
+      // Swallow the InvalidStateError — the Rust side will detect the missing
+      // ACK via stale-edit detection and trigger a reconnect.
+    }
   }
 
   kickAllStylesheetsOnPage() {

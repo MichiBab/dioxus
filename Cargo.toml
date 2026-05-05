@@ -236,7 +236,9 @@ image = "0.25.6"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 sha1 = "0.10.6"
 md5 = "0.8.0"
-rpm = { version = "0.20.0", default-features = false, features = ["gzip-compression"] }
+rpm = { version = "0.20.0", default-features = false, features = [
+    "gzip-compression",
+] }
 lru = "0.16.0"
 async-trait = "0.1.88"
 axum = { version = "0.8.4", default-features = false }
@@ -278,8 +280,8 @@ ciborium = "0.2.2"
 base64 = "0.22.1"
 uuid = "1.17.0"
 convert_case = "0.8.0"
-tungstenite = { version = "0.28.0" }
-tokio-tungstenite = { version = "0.28.0" }
+tungstenite = { version = "0.29.0" }
+tokio-tungstenite = { version = "0.29.0" }
 gloo-timers = "0.3.0"
 internment = { version = "0.8.6" }
 proc-macro2-diagnostics = { version = "0.10", default-features = false }
@@ -337,9 +339,9 @@ serde_urlencoded = "0.7.1"
 form_urlencoded = "1.2.1"
 winnow = "0.7.14"
 
-# desktop
-wry = { version = "0.53.5", default-features = false }
-tao = { version = "0.34.0", features = ["rwh_05"] }
+# desktop0.35.00.35.0
+wry = { version = "0.55.0", default-features = false }
+tao = { version = "0.35.0", features = ["rwh_05"] }
 infer = "0.19.0"
 dunce = "1.0.5"
 percent-encoding = "2.3.1"
@@ -349,7 +351,7 @@ open = "5.3.2"
 webbrowser = "1.0"
 
 # web
-gloo-dialogs = "0.2.0"
+gloo-dialogs = "0.3.0"
 
 # tui stuff
 ansi-to-tui = "7.0"
@@ -912,10 +914,10 @@ name = "websocket"
 path = "examples/07-fullstack/websocket.rs"
 doc-scrape-examples = true
 
-[[example]]
-name = "drag_and_drop"
-path = "examples/08-apis/drag_and_drop.rs"
-doc-scrape-examples = true
+# [[example]]
+# name = "drag_and_drop"
+# path = "examples/08-apis/drag_and_drop.rs"
+# doc-scrape-examples = true
 
 [[example]]
 name = "control_focus"
