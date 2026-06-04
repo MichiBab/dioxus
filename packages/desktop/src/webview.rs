@@ -353,6 +353,7 @@ impl WebviewInstance {
             }
         };
 
+        let navigation_handler = cfg.navigation_handler.take();
         let page_loaded = AtomicBool::new(false);
 
         let mut webview = WebViewBuilder::new_with_web_context(&mut web_context)
@@ -367,25 +368,29 @@ impl WebviewInstance {
             .with_url("dioxus://index.html/")
             .with_ipc_handler(ipc_handler)
             .with_navigation_handler(move |var| {
-                // We don't want to allow any navigation
-                // We only want to serve the index file and assets
+                // Serve the index and assets.
                 if var.starts_with("dioxus://")
                     || var.starts_with("http://dioxus.")
                     || var.starts_with("https://dioxus.")
                 {
                     // After the page has loaded once, don't allow any more navigation
                     let page_loaded = page_loaded.swap(true, std::sync::atomic::Ordering::SeqCst);
-                    !page_loaded
-                } else {
-                    if var.starts_with("http://")
-                        || var.starts_with("https://")
-                        || var.starts_with("mailto:")
-                    {
-                        _ = webbrowser::open(&var);
-                    }
-                    false
+                    return !page_loaded;
                 }
-            }) // prevent all navigations
+
+                // External links always open somewhere else. Prevents the webview from navigating
+                if var.starts_with("http://")
+                    || var.starts_with("https://")
+                    || var.starts_with("mailto:")
+                {
+                    _ = webbrowser::open(&var);
+                    return false;
+                }
+
+                // By default, external links are allowed. This keeps things like iframes working.
+                // However, users can customize this to allow/disallow domains/routes/patterns.
+                navigation_handler.as_ref().map(|f| f(&var)).unwrap_or(true)
+            })
             .with_asynchronous_custom_protocol(String::from("dioxus"), request_handler);
 
         // Enable https scheme on android, needed for secure context API, like the geolocation API
@@ -547,6 +552,20 @@ impl WebviewInstance {
                 .poll_new_edits_location(&mut cx)
                 .is_ready()
             {
+                eprintln!("DBG-FREEZE: in poll new edits location is ready");
+                _ = self.desktop_context.webview.evaluate_script(&format!(
+                    "window.interpreter.waitForRequest(\"{edits_path}\", \"{expected_key}\");",
+                    edits_path = self.edits.wry_queue.edits_path(),
+                    expected_key = self.edits.wry_queue.required_server_key()
+                ));
+            }
+
+            // On Android, detect stale ACKs caused by dead/frozen WebSocket.
+            // Trigger a JS-side WS reconnect. The edit is NOT cleared here — it
+            // will be re-sent through the new connection and ACKed for real.
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            if self.edits.wry_queue.has_stale_edit() {
+                eprintln!("[VDOM] Stale ACK — triggering JS WebSocket reconnect");
                 _ = self.desktop_context.webview.evaluate_script(&format!(
                     "window.interpreter.waitForRequest(\"{edits_path}\", \"{expected_key}\");",
                     edits_path = self.edits.wry_queue.edits_path(),
@@ -557,6 +576,7 @@ impl WebviewInstance {
             // If we're waiting for a render, wait for it to finish before we continue
             let edits_flushed_poll = self.edits.wry_queue.poll_edits_flushed(&mut cx);
             if edits_flushed_poll.is_pending() {
+                eprintln!("DBG-FREEZE: edits flushed is pending, waiting for flush to complete");
                 return;
             }
 
@@ -566,10 +586,15 @@ impl WebviewInstance {
                 let _lock = crate::android_sync_lock::android_runtime_lock();
                 let fut = self.dom.wait_for_work();
                 pin_mut!(fut);
-
+                eprintln!("DBG-FREEZE: going into fut poll_unpin");
                 match fut.poll_unpin(&mut cx) {
-                    std::task::Poll::Ready(_) => {}
-                    std::task::Poll::Pending => return,
+                    std::task::Poll::Ready(_) => {
+                        eprintln!("DBG-FREEZE: fut is ready, continuing loop to check for edits");
+                    }
+                    std::task::Poll::Pending => {
+                        eprintln!("DBG-FREEZE: fut is pending, waiting for work");
+                        return;
+                    }
                 }
             }
 
@@ -580,7 +605,25 @@ impl WebviewInstance {
             self.edits
                 .wry_queue
                 .with_mutation_state_mut(|f| self.dom.render_immediate(f));
-            self.edits.wry_queue.send_edits();
+            let _channel_dead = self.edits.wry_queue.send_edits();
+            eprintln!("DBG-FREEZE: sent edits to webview");
+
+            // On Android, if the edit channel is dead (message went to the
+            // Pending queue), trigger an immediate JS WebSocket reconnect.
+            // The edits are safely queued and will be sent through the new
+            // connection once JS reconnects. Clear edits_in_progress so the
+            // render loop can continue processing VDom work instead of
+            // blocking forever on an ACK that requires the reconnect first.
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            if _channel_dead {
+                eprintln!("[VDOM] Edit channel dead after send — immediate JS WS reconnect");
+                _ = self.desktop_context.webview.evaluate_script(&format!(
+                    "window.interpreter.waitForRequest(\"{edits_path}\", \"{expected_key}\");",
+                    edits_path = self.edits.wry_queue.edits_path(),
+                    expected_key = self.edits.wry_queue.required_server_key()
+                ));
+                self.edits.wry_queue.clear_edits_in_progress();
+            }
         }
     }
 
