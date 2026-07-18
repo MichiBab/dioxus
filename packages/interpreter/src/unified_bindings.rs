@@ -48,28 +48,28 @@ mod js {
         "{this.pushRoot(this.nodes[$root$]);}"
     }
     fn append_children(id: u32, many: u16) {
-        "{this.appendChildren($id$, $many$);}"
+        "{let t=performance.now();this.appendChildren($id$, $many$);let p=this.__mutationPerf;if(p){p.counts.append++;p.times.append+=performance.now()-t;}}"
     }
     fn pop_root() {
         "{this.stack.pop();}"
     }
     fn replace_with(id: u32, n: u16) {
-        "{const root = this.nodes[$id$]; let els = this.stack.splice(this.stack.length-$n$); if (root.listening) { this.removeAllNonBubblingListeners(root); } root.replaceWith(...els);}"
+        "{let t=performance.now();const root = this.nodes[$id$]; let els = this.stack.splice(this.stack.length-$n$); if (root.listening) { this.removeAllNonBubblingListeners(root); } root.replaceWith(...els);let p=this.__mutationPerf;if(p){p.counts.append++;p.times.append+=performance.now()-t;}}"
     }
     fn insert_after(id: u32, n: u16) {
-        "{let node = this.nodes[$id$];node.after(...this.stack.splice(this.stack.length-$n$));}"
+        "{let t=performance.now();let node = this.nodes[$id$];node.after(...this.stack.splice(this.stack.length-$n$));let p=this.__mutationPerf;if(p){p.counts.append++;p.times.append+=performance.now()-t;}}"
     }
     fn insert_before(id: u32, n: u16) {
-        "{let node = this.nodes[$id$];node.before(...this.stack.splice(this.stack.length-$n$));}"
+        "{let t=performance.now();let node = this.nodes[$id$];node.before(...this.stack.splice(this.stack.length-$n$));let p=this.__mutationPerf;if(p){p.counts.append++;p.times.append+=performance.now()-t;}}"
     }
     fn remove(id: u32) {
         "{let node = this.nodes[$id$]; if (node !== undefined) { if (node.listening) { this.removeAllNonBubblingListeners(node); } node.remove(); }}"
     }
     fn create_raw_text(text: &str) {
-        "{this.stack.push(document.createTextNode($text$));}"
+        "{let t=performance.now();this.stack.push(document.createTextNode($text$));let p=this.__mutationPerf;if(p){p.counts.createText++;p.times.createText+=performance.now()-t;}}"
     }
     fn create_text_node(text: &str, id: u32) {
-        "{let node = document.createTextNode($text$); this.nodes[$id$] = node; this.stack.push(node);}"
+        "{let t=performance.now();let node = document.createTextNode($text$); this.nodes[$id$] = node; this.stack.push(node);let p=this.__mutationPerf;if(p){p.counts.createText++;p.times.createText+=performance.now()-t;}}"
     }
     fn create_placeholder(id: u32) {
         "{let node = document.createComment('placeholder'); this.stack.push(node); this.nodes[$id$] = node;}"
@@ -90,7 +90,7 @@ mod js {
         "{this.nodes[$id$].textContent = $text$;}"
     }
     fn set_attribute(id: u32, field: &str<u8, attr>, value: &str, ns: &str<u8, ns_cache>) {
-        "{let node = this.nodes[$id$]; this.setAttributeInner(node, $field$, $value$, $ns$);}"
+        "{let t=performance.now();let node = this.nodes[$id$]; this.setAttributeInner(node, $field$, $value$, $ns$);let p=this.__mutationPerf;if(p){p.counts.attribute++;p.times.attribute+=performance.now()-t;}}"
     }
     fn remove_attribute(id: u32, field: &str<u8, attr>, ns: &str<u8, ns_cache>) {
         r#"{
@@ -128,23 +128,25 @@ mod js {
         "{let els = this.stack.splice(this.stack.length - $n$); let node = this.loadChild($ptr$, $len$); node.replaceWith(...els);}"
     }
     fn load_template(tmpl_id: u16, index: u16, id: u32) {
-        "{let node = this.templates[$tmpl_id$][$index$].cloneNode(true); this.nodes[$id$] = node; this.stack.push(node);}"
+        "{let t=performance.now();let node = this.templates[$tmpl_id$][$index$].cloneNode(true); this.nodes[$id$] = node; this.stack.push(node);let p=this.__mutationPerf;if(p){p.counts.template++;p.times.template+=performance.now()-t;}}"
     }
 
     #[cfg(feature = "binary-protocol")]
     fn append_children_to_top(many: u16) {
         "{
+            let t=performance.now();
             let root = this.stack[this.stack.length-many-1];
             let els = this.stack.splice(this.stack.length-many);
             for (let k = 0; k < many; k++) {
                 root.appendChild(els[k]);
             }
+            let p=this.__mutationPerf;if(p){p.counts.append++;p.times.append+=performance.now()-t;}
         }"
     }
 
     #[cfg(feature = "binary-protocol")]
     fn set_top_attribute(field: &str<u8, attr>, value: &str, ns: &str<u8, ns_cache>) {
-        "{this.setAttributeInner(this.stack[this.stack.length-1], $field$, $value$, $ns$);}"
+        "{let t=performance.now();this.setAttributeInner(this.stack[this.stack.length-1], $field$, $value$, $ns$);let p=this.__mutationPerf;if(p){p.counts.attribute++;p.times.attribute+=performance.now()-t;}}"
     }
 
     #[cfg(feature = "binary-protocol")]
@@ -154,12 +156,12 @@ mod js {
 
     #[cfg(feature = "binary-protocol")]
     fn create_element(element: &'static str<u8, el>) {
-        "{this.stack.push(document.createElement($element$))}"
+        "{let t=performance.now();this.stack.push(document.createElement($element$));let p=this.__mutationPerf;if(p){p.counts.createElement++;p.times.createElement+=performance.now()-t;}}"
     }
 
     #[cfg(feature = "binary-protocol")]
     fn create_element_ns(element: &'static str<u8, el>, ns: &'static str<u8, namespace>) {
-        "{this.stack.push(document.createElementNS($ns$, $element$))}"
+        "{let t=performance.now();this.stack.push(document.createElementNS($ns$, $element$));let p=this.__mutationPerf;if(p){p.counts.createElement++;p.times.createElement+=performance.now()-t;}}"
     }
 
     #[cfg(feature = "binary-protocol")]
@@ -170,6 +172,7 @@ mod js {
     #[cfg(feature = "binary-protocol")]
     fn foreign_event_listener(event: &str<u8, evt>, id: u32, bubbles: u8) {
         r#"
+    const __dxMutationStarted = performance.now();
     bubbles = bubbles == 1;
     let this_node = this.nodes[id];
     if(this_node.listening){
@@ -182,18 +185,29 @@ mod js {
 
     // if this is a mounted listener, we send the event immediately
     if (event_name === "mounted") {
-        window.ipc.postMessage(
-            this.sendSerializedEvent({
-                name: event_name,
-                element: id,
-                data: null,
-                bubbles,
-            })
-        );
+        // Mounted notifications never need preventDefault/stopPropagation, so
+        // avoid one synchronous localhost XHR per listener on Android WebView.
+        this.queueMountedEvent({
+            name: event_name,
+            element: id,
+            data: null,
+            bubbles,
+        });
     } else {
         this.createListener(event_name, this_node, bubbles, (event) => {
             this.handler(event, event_name, bubbles);
         });
+    }
+    const __dxMutationProfile = this.__mutationPerf;
+    if (__dxMutationProfile) {
+        const __dxMutationElapsed = performance.now() - __dxMutationStarted;
+        if (event_name === "mounted") {
+            __dxMutationProfile.counts.mountedListener++;
+            __dxMutationProfile.times.mountedListener += __dxMutationElapsed;
+        } else {
+            __dxMutationProfile.counts.eventListener++;
+            __dxMutationProfile.times.eventListener += __dxMutationElapsed;
+        }
     }"#
     }
 

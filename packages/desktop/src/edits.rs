@@ -58,6 +58,11 @@ impl WryQueue {
         let mut myself = self.inner.borrow_mut();
         let webview_id = myself.location.webview_id;
         let serialized_edits = myself.mutation_state.export_memory();
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        eprintln!(
+            "[MUTATION_PERF] Rust sending mutation batch: {} bytes",
+            serialized_edits.len()
+        );
         let receiver = myself.websocket.send_edits(webview_id, serialized_edits);
         let channel_dead = myself.websocket.is_pending(webview_id);
         myself.edits_in_progress = Some(receiver);
@@ -109,6 +114,13 @@ impl WryQueue {
                 std::task::Poll::Ready(()) => {
                     // ACK received — clear so check_and_reset_stale_edit
                     // doesn't mistake this resolved receiver for a stale one.
+                    #[cfg(any(target_os = "android", target_os = "ios"))]
+                    if let Some(sent_at) = self_mut.edit_sent_at {
+                        eprintln!(
+                            "[MUTATION_PERF] Rust received mutation ACK after {:.2}ms",
+                            sent_at.elapsed().as_secs_f64() * 1000.0
+                        );
+                    }
                     self_mut.edits_in_progress = None;
                     self_mut.edit_sent_at = None;
                     std::task::Poll::Ready(())
