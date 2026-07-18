@@ -51,6 +51,44 @@ impl WebviewEdits {
         responder.respond(wry::http::Response::new(body))
     }
 
+    pub fn handle_mounted_events(
+        &self,
+        request: wry::http::Request<Vec<u8>>,
+        responder: wry::RequestAsyncResponder,
+    ) {
+        if let Err(err) = self.try_handle_mounted_events(request) {
+            tracing::error!("Failed to handle mounted event batch: {err:?}");
+        }
+        responder.respond(wry::http::Response::new(Vec::new()));
+    }
+
+    fn try_handle_mounted_events(
+        &self,
+        request: wry::http::Request<Vec<u8>>,
+    ) -> Result<(), serde_json::Error> {
+        use serde::de::Error;
+
+        let data = request
+            .headers()
+            .get("dioxus-data")
+            .ok_or_else(|| Error::custom("dioxus-data header not set"))?;
+        let as_utf = std::str::from_utf8(data.as_bytes())
+            .map_err(|_| Error::custom("dioxus-data header is not a valid (utf-8) string"))?;
+        let data_from_header = base64::Engine::decode(&BASE64_STANDARD, as_utf)
+            .map_err(|_| Error::custom("dioxus-data header is not a base64 string"))?;
+        let events: Vec<HtmlEvent> = serde_json::from_slice(&data_from_header)?;
+
+        // Mounted handlers can touch the runtime. Hold the Android lock once for
+        // the complete render batch rather than once per mounted element.
+        #[cfg(target_os = "android")]
+        let _lock = crate::android_sync_lock::android_runtime_lock();
+        for event in events {
+            self.handle_html_event(event);
+        }
+
+        Ok(())
+    }
+
     pub fn try_handle_event(
         &self,
         request: wry::http::Request<Vec<u8>>,

@@ -63,6 +63,12 @@ pub(super) fn desktop_handler(
         return edit_state.handle_event(request, responder);
     }
 
+    // Mounted notifications do not need synchronous browser responses. Batch them
+    // so a render incurs one protocol request instead of one request per element.
+    if trimmed_uri == "__mounted_events" {
+        return edit_state.handle_mounted_events(request, responder);
+    }
+
     // If the request is asking for a file dialog, handle that, returning the list of files selected
     if trimmed_uri == "__file_dialog" {
         if let Err(err) = file_dialog_responder_sync(request, responder) {

@@ -450,29 +450,33 @@ export class NativeInterpreter extends JSChannel_ {
         }
     }
 
-    sendSerializedEventAsync(body: {
-        name: string;
-        element: number;
-        data: any;
-        bubbles: boolean;
-    }) {
+    sendSerializedMountedEvents(
+        events: Array<{
+            name: string;
+            element: number;
+            data: any;
+            bubbles: boolean;
+        }>,
+    ) {
         if (this.liveview) {
-            this.sendIpcMessage("user_event", body);
+            for (const event of events) {
+                this.sendIpcMessage("user_event", event);
+            }
             return;
         }
 
-        const encoded = new TextEncoder().encode(JSON.stringify(body));
+        const encoded = new TextEncoder().encode(JSON.stringify(events));
         const base64 = btoa(
             String.fromCharCode.apply(null, Array.from(encoded)),
         );
-        fetch(this.eventsPath, {
+        fetch(`${this.baseUri}/__mounted_events`, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
                 "dioxus-data": base64,
             },
         }).catch((error) =>
-            console.error("Failed to send mounted event", error),
+            console.error("Failed to send mounted events", error),
         );
     }
 
@@ -490,9 +494,7 @@ export class NativeInterpreter extends JSChannel_ {
             this.mountedEventFlushScheduled = false;
             const events = this.mountedEventQueue;
             this.mountedEventQueue = [];
-            for (const event of events) {
-                this.sendSerializedEventAsync(event);
-            }
+            this.sendSerializedMountedEvents(events);
         });
     }
 
