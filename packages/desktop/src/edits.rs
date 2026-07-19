@@ -89,10 +89,6 @@ impl WryQueue {
                                 return false;
                             }
                         }
-                        eprintln!(
-                            "[EDITS] Stale ACK detected ({}ms) — triggering WS reconnect",
-                            sent_at.elapsed().as_millis()
-                        );
                         inner.reconnect_triggered_at = Some(Instant::now());
                         return true;
                     }

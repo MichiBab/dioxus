@@ -19,7 +19,6 @@ pub fn launch_virtual_dom_blocking(virtual_dom: VirtualDom, mut desktop_config: 
     let (event_loop, mut app) = App::new(desktop_config, virtual_dom);
 
     event_loop.run(move |window_event, event_loop, control_flow| {
-        // eprintln!("DBG-FREEZE: Received event: {:?}", window_event);
         // Set the control flow and check if any events need to be handled in the app itself
         app.tick(&window_event);
 
@@ -46,7 +45,6 @@ pub fn launch_virtual_dom_blocking(virtual_dom: VirtualDom, mut desktop_config: 
             // the stale-ACK timer adds unnecessary latency.
             #[cfg(any(target_os = "android", target_os = "ios"))]
             Event::Resumed => {
-                eprintln!("[LAUNCH] Resumed event — forcing WS reconnect for all webviews");
                 for view in app.webviews.values() {
                     _ = view.desktop_context.webview.evaluate_script(&format!(
                         "window.interpreter.waitForRequest(\"{edits_path}\", \"{expected_key}\");",
@@ -132,10 +130,6 @@ pub fn launch_virtual_dom_blocking(virtual_dom: VirtualDom, mut desktop_config: 
             _ => {}
         }
 
-        // eprintln!(
-        //     "DBG-FREEZE: Setting control flow to: {:?}",
-        //     app.control_flow
-        // );
         // On Android, never sleep indefinitely: cap the wait at 500 ms so that
         // even if waker-based Poll events are dropped by the Android Looper the
         // event loop will still wake up and re-kick the VirtualDom.
