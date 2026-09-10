@@ -649,9 +649,8 @@ impl WebviewInstance {
             // On Android, if the edit channel is dead (message went to the
             // Pending queue), trigger an immediate JS WebSocket reconnect.
             // The edits are safely queued and will be sent through the new
-            // connection once JS reconnects. Clear edits_in_progress so the
-            // render loop can continue processing VDom work instead of
-            // blocking forever on an ACK that requires the reconnect first.
+            // connection once JS reconnects. Keep the original render barrier:
+            // reconnecting does not require polling component work.
             #[cfg(any(target_os = "android", target_os = "ios"))]
             if _channel_dead {
                 eprintln!("[VDOM] Edit channel dead after send — immediate JS WS reconnect");
@@ -660,7 +659,6 @@ impl WebviewInstance {
                     edits_path = self.edits.wry_queue.edits_path(),
                     expected_key = self.edits.wry_queue.required_server_key()
                 ));
-                self.edits.wry_queue.clear_edits_in_progress();
             }
         }
     }

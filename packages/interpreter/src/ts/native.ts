@@ -4,6 +4,7 @@
 // provide since it doesn't have access to the dom.
 
 import { BaseInterpreter, NodeId } from "./core";
+import { MutationSequence } from "./mutation_sequence";
 import {
     SerializedEvent,
     serializeEvent,
@@ -27,6 +28,8 @@ export class NativeInterpreter extends JSChannel_ {
     intercept_link_redirects: boolean;
     ipc: any;
     edits: WebSocket;
+    private mutationSequence = new MutationSequence();
+    private editConnectionGeneration = 0;
     baseUri: string;
     eventsPath: string;
     headless: boolean;
@@ -555,7 +558,12 @@ export class NativeInterpreter extends JSChannel_ {
             old.onclose = null; // prevent reconnect loop from old WS
             old.close();
         }
-        const ws = new WebSocket(editsPath);
+        const ws = new WebSocket(
+            `${editsPath}?generation=${++this.editConnectionGeneration}`,
+        );
+        // Avoid asynchronous Blob conversion: frames are handled in order in
+        // the message task, even across socket replacements.
+        ws.binaryType = "arraybuffer";
         this.edits = ws;
         // Only trust the websocket once it sends us the required server key
         let authenticated = false;
@@ -573,57 +581,65 @@ export class NativeInterpreter extends JSChannel_ {
         };
         ws.onmessage = (event) => {
             const data = event.data;
-            if (data instanceof Blob) {
+            if (this.edits !== ws) return;
+            if (data instanceof ArrayBuffer) {
                 if (!authenticated) {
                     return;
                 }
                 const receivedAt = performance.now();
-                const byteLength = data.size;
-                // Apply edits and ACK in the microtask (Promise.then) instead of
-                // requestAnimationFrame. Android throttles RAF when the app is
-                // backgrounded, which stalls the ACK and freezes the VirtualDom.
-                data.arrayBuffer().then((buffer) => {
-                    // If this WS was replaced while the microtask was queued, skip.
-                    if (this.edits !== ws) return;
-                    const applyStartedAt = performance.now();
-                    const mutationProfile = {
-                        counts: {
-                            append: 0,
-                            attribute: 0,
-                            createElement: 0,
-                            createText: 0,
-                            eventListener: 0,
-                            mountedListener: 0,
-                            template: 0,
-                        },
-                        times: {
-                            append: 0,
-                            attribute: 0,
-                            createElement: 0,
-                            createText: 0,
-                            eventListener: 0,
-                            mountedListener: 0,
-                            template: 0,
-                        },
-                    };
-                    // The generated sledgehammer opcode snippets update this object.
-                    (this as any).__mutationPerf = mutationProfile;
-                    // @ts-ignore
-                    this.run_from_bytes(buffer);
+                const byteLength = data.byteLength;
+                // Apply edits and ACK directly in this message task. Android
+                // throttles requestAnimationFrame in the background; waiting
+                // for it would stall the VirtualDom's render barrier.
+                try {
+                    const ack = this.mutationSequence.apply(data, (buffer) => {
+                        const applyStartedAt = performance.now();
+                        const mutationProfile = {
+                            counts: {
+                                append: 0,
+                                attribute: 0,
+                                createElement: 0,
+                                createText: 0,
+                                eventListener: 0,
+                                mountedListener: 0,
+                                template: 0,
+                            },
+                            times: {
+                                append: 0,
+                                attribute: 0,
+                                createElement: 0,
+                                createText: 0,
+                                eventListener: 0,
+                                mountedListener: 0,
+                                template: 0,
+                            },
+                        };
+                        // The generated sledgehammer opcode snippets update this object.
+                        (this as any).__mutationPerf = mutationProfile;
+                        // @ts-ignore
+                        this.run_from_bytes(buffer);
+                        delete (this as any).__mutationPerf;
+                        const applyFinishedAt = performance.now();
+                        const mountedChat =
+                            document.querySelector("[data-chat-messages]") !==
+                            null;
+                        console.info(
+                            `[MUTATION_PERF] WebView batch bytes=${byteLength} ` +
+                                `blob=${(applyStartedAt - receivedAt).toFixed(2)}ms ` +
+                                `apply=${(applyFinishedAt - applyStartedAt).toFixed(2)}ms ` +
+                                `total=${(applyFinishedAt - receivedAt).toFixed(2)}ms ` +
+                                `chat_present=${mountedChat} ` +
+                                `profile=${JSON.stringify(mutationProfile)}`,
+                        );
+                    });
+                    // ACK this socket and this batch, never whichever socket
+                    // happens to become current later.
+                    if (ws.readyState === WebSocket.OPEN) ws.send(ack);
+                } catch (error) {
+                    console.error("[EDITS] Mutation delivery failed", error);
                     delete (this as any).__mutationPerf;
-                    const applyFinishedAt = performance.now();
-                    const mountedChat =
-                        document.querySelector("[data-chat-messages]") !== null;
-                    console.info(
-                        `[MUTATION_PERF] WebView batch bytes=${byteLength} ` +
-                            `blob=${(applyStartedAt - receivedAt).toFixed(2)}ms ` +
-                            `apply=${(applyFinishedAt - applyStartedAt).toFixed(2)}ms ` +
-                            `total=${(applyFinishedAt - receivedAt).toFixed(2)}ms ` +
-                            `chat_present=${mountedChat} ` +
-                            `profile=${JSON.stringify(mutationProfile)}`,
-                    );
-                    this.markEditsFinished();
-                });
+                    ws.close();
+                }
             } else if (typeof data === "string") {
                 if (data === required_server_key) {
                     // If the data is the required server key, we can trust the websocket

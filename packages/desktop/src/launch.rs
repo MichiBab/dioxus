@@ -48,6 +48,7 @@ pub fn launch_virtual_dom_blocking(virtual_dom: VirtualDom, mut desktop_config: 
             Event::Resumed => {
                 eprintln!("[LAUNCH] Resumed event — forcing WS reconnect for all webviews");
                 for view in app.webviews.values() {
+                    view.edits.wry_queue.set_suspended(false);
                     _ = view.desktop_context.webview.evaluate_script(&format!(
                         "window.interpreter.waitForRequest(\"{edits_path}\", \"{expected_key}\");",
                         edits_path = view.edits.wry_queue.edits_path(),
@@ -57,6 +58,12 @@ pub fn launch_virtual_dom_blocking(virtual_dom: VirtualDom, mut desktop_config: 
                 let ids: Vec<_> = app.webviews.keys().copied().collect();
                 for id in ids {
                     _ = app.shared.proxy.send_event(UserWindowEvent::Poll(id));
+                }
+            }
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            Event::Suspended => {
+                for view in app.webviews.values() {
+                    view.edits.wry_queue.set_suspended(true);
                 }
             }
             Event::WindowEvent {
